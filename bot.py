@@ -6,54 +6,51 @@ import pytz
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from groq import Groq
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
-# ---------- Получение переменных окружения ----------
+# ---------- Переменные окружения ----------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-SEARXNG_URL = os.getenv("SEARXNG_URL")  # добавим эту переменную на Railway
+SEARXNG_URL = os.getenv("SEARXNG_URL")
 
-# Если переменная SEARXNG_URL не задана, можно указать вручную (но лучше через переменные)
 if not SEARXNG_URL:
-    SEARXNG_URL = "https://searxng-production-a4bb.up.railway.app"  # замени на свой URL, если не хочешь через env
+    SEARXNG_URL = "https://searxng-production-a4bb.up.railway.app"  # замени на свой URL
 
-# Инициализация Groq и переводчика
 client = Groq(api_key=GROQ_API_KEY)
-translator = Translator()
 
-# Хранилище истории диалогов (по user_id)
 user_histories = {}
-MAX_HISTORY = 5  # последние 5 сообщений
+MAX_HISTORY = 5
 
-# ---------- Функции перевода (через googletrans, бесплатно) ----------
+# ---------- Перевод через deep_translator (синхронно, но в потоке) ----------
 async def translate_to_en(text):
-    """Перевод с русского на английский"""
+    if not text:
+        return text
     try:
-        result = await translator.translate(text, src='ru', dest='en')
-        return result.text
+        result = await asyncio.to_thread(
+            GoogleTranslator(source='ru', target='en').translate, text
+        )
+        return result
     except Exception as e:
         print(f"Translation to EN error: {e}")
         return text
 
 async def translate_to_ru(text):
-    """Перевод с английского на русский"""
     if not text:
         return text
     try:
-        result = await translator.translate(text, src='en', dest='ru')
-        return result.text
+        result = await asyncio.to_thread(
+            GoogleTranslator(source='en', target='ru').translate, text
+        )
+        return result
     except Exception as e:
         print(f"Translation to RU error: {e}")
         return text
 
 # ---------- Поиск через SearXNG ----------
 async def web_search(query):
-    """Поиск в интернете через собственный SearXNG"""
-    # Переводим запрос на английский для лучшего поиска
     en_query = await translate_to_en(query)
     if not en_query:
         en_query = query
-
     print(f"Searching SearXNG for: {en_query}")
 
     params = {
@@ -75,7 +72,6 @@ async def web_search(query):
                 if "results" not in data or not data["results"]:
                     return "По вашему запросу ничего не найдено."
 
-                # Берём первые 3 результата
                 snippets = []
                 for item in data["results"][:3]:
                     title = item.get("title", "")
@@ -94,7 +90,7 @@ async def web_search(query):
         print(f"SearXNG error: {e}")
         return f"Ошибка поиска: {e}"
 
-# ---------- Погода и время ----------
+# ---------- Погода ----------
 async def get_weather(city):
     try:
         geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1"
@@ -118,6 +114,7 @@ async def get_weather(city):
     except Exception as e:
         return f"Не удалось получить погоду: {e}"
 
+# ---------- Время ----------
 async def get_time(timezone_str="UTC"):
     try:
         tz = pytz.timezone(timezone_str)
@@ -126,7 +123,7 @@ async def get_time(timezone_str="UTC"):
     except:
         return "Неверный часовой пояс."
 
-# ---------- Обычный ответ через Groq (с памятью) ----------
+# ---------- Обычный ответ через Groq ----------
 async def ask_groq(user_id, prompt):
     history = user_histories.get(user_id, [])
     history.append({"role": "user", "content": prompt})
@@ -153,12 +150,11 @@ async def ask_groq(user_id, prompt):
     except Exception as e:
         return f"Ошибка ИИ: {e}"
 
-# ---------- Обработчик входящих сообщений ----------
+# ---------- Обработчик сообщений ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    # Проверяем, упомянут ли бот
     mentioned = False
     if update.message.entities:
         for entity in update.message.entities:
@@ -186,7 +182,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     lower = clean_text.lower()
 
-    # ---- Погода ----
+    # Погода
     if "погод" in lower:
         if "в " in lower:
             city = clean_text.split("в ", 1)[1].strip()
@@ -196,7 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---- Время ----
+    # Время
     if "врем" in lower or "сколько времени" in lower:
         if "в " in lower:
             tz_part = clean_text.split("в ", 1)[1].strip()
@@ -213,18 +209,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---- Интернет-поиск (если есть ключевые слова) ----
+    # Поиск в интернете
     search_keywords = ["найди", "поищи", "узнай", "что такое", "кто такой", "какой", "где", "когда", "сколько"]
     if any(kw in lower for kw in search_keywords):
         reply = await web_search(clean_text)
         await update.message.reply_text(reply)
         return
 
-    # ---- Обычный вопрос (через ИИ) ----
+    # Обычный вопрос
     reply = await ask_groq(user_id, clean_text)
     await update.message.reply_text(reply)
 
-# ---------- Запуск бота ----------
+# ---------- Запуск ----------
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
