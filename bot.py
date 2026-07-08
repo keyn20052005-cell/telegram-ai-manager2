@@ -8,42 +8,43 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# Словарь для хранения истории диалога по каждому пользователю
-# Ключ: user_id, значение: список из последних 100 сообщений (каждое в формате {"role": "user" или "assistant", "content": текст})
+# Словарь для хранения истории по каждому пользователю
 user_histories = {}
 
-# Максимальное количество хранимых сообщений на пользователя
-MAX_HISTORY = 100
+# Максимальное количество сообщений в истории на пользователя
+MAX_HISTORY = 20
+
+# Максимальная длина одного сообщения (чтобы не перегружать запрос)
+MAX_MSG_LEN = 1000
 
 async def ask_groq_with_history(user_id, new_message):
-    """Отправляет запрос в Groq с учётом истории пользователя"""
-    # Получаем историю пользователя (или создаём новую)
     history = user_histories.get(user_id, [])
     
-    # Добавляем новое сообщение пользователя в историю
+    # Ограничиваем длину нового сообщения
+    if len(new_message) > MAX_MSG_LEN:
+        new_message = new_message[:MAX_MSG_LEN]
+    
     history.append({"role": "user", "content": new_message})
     
-    # Если история стала длиннее MAX_HISTORY, обрезаем самое старое сообщение
+    # Оставляем только последние MAX_HISTORY сообщений
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
     
-    # Формируем список сообщений для Groq: системная инструкция + вся история
     messages = [
-        {"role": "system", "content": "Ты полезный ассистент, который отвечает на вопросы. У тебя есть доступ к интернету для поиска актуальной информации."}
+        {"role": "system", "content": "Ты полезный ассистент. У тебя есть доступ к интернету для поиска актуальной информации, погоды, времени и новостей. Отвечай подробно, но по делу."}
     ] + history
     
     try:
         chat_completion = client.chat.completions.create(
             messages=messages,
-            model="groq/compound",  # даёт доступ к интернету и инструментам
-            max_tokens=2048,        # увеличенный лимит
+            model="groq/compound",
+            max_tokens=2048,
             temperature=0.7
         )
         reply = chat_completion.choices[0].message.content
         
-        # Сохраняем ответ ассистента в историю
+        # Сохраняем ответ в историю
         history.append({"role": "assistant", "content": reply})
-        # Обновляем историю пользователя
         if len(history) > MAX_HISTORY:
             history = history[-MAX_HISTORY:]
         user_histories[user_id] = history
@@ -56,7 +57,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     
-    # Проверяем, упомянут ли бот
+    # Проверка упоминания
     mentioned = False
     if update.message.entities:
         for entity in update.message.entities:
