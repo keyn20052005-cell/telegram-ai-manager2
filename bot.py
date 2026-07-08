@@ -1,37 +1,33 @@
 import os
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-import openai
+from groq import Groq
 
-# Токены из переменных окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Функция для ответа через ChatGPT
-async def ask_gpt(prompt):
+client = Groq(api_key=GROQ_API_KEY)
+
+async def ask_groq(prompt):
     try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-3.5-turbo",
+        chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
+            model="llama3-8b-8192",
             max_tokens=300
         )
-        return response.choices[0].message.content
+        return chat_completion.choices[0].message.content
     except Exception as e:
-        return f"Ошибка при запросе к ИИ: {e}"
+        return f"Ошибка: {e}"
 
-# Обработчик сообщений – отвечает, только когда бота упомянули
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, есть ли упоминание бота
     if update.message.mention or (
         update.message.reply_to_message and
         update.message.reply_to_message.from_user.username == context.bot.username
     ):
         user_text = update.message.text
-        # Убираем упоминание из текста
         clean_text = user_text.replace(f"@{context.bot.username}", "").strip()
         if clean_text:
-            reply = await ask_gpt(clean_text)
+            reply = await ask_groq(clean_text)
             await update.message.reply_text(reply)
 
 def main():
