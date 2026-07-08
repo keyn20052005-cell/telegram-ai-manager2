@@ -14,14 +14,14 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SEARXNG_URL = os.getenv("SEARXNG_URL")
 
 if not SEARXNG_URL:
-    SEARXNG_URL = "https://searxng-production-a4bb.up.railway.app"  # замени на свой URL
+    SEARXNG_URL = "https://searxng-production-a4bb.up.railway.app"  # замени на свой URL, если не через env
 
 client = Groq(api_key=GROQ_API_KEY)
 
 user_histories = {}
 MAX_HISTORY = 5
 
-# ---------- Перевод через deep_translator (синхронно, но в потоке) ----------
+# ---------- Перевод через deep_translator ----------
 async def translate_to_en(text):
     if not text:
         return text
@@ -46,7 +46,7 @@ async def translate_to_ru(text):
         print(f"Translation to RU error: {e}")
         return text
 
-# ---------- Поиск через SearXNG ----------
+# ---------- Поиск через SearXNG (всегда возвращает строку) ----------
 async def web_search(query):
     en_query = await translate_to_en(query)
     if not en_query:
@@ -66,34 +66,30 @@ async def web_search(query):
                 if response.status != 200:
                     error_text = await response.text()
                     print(f"SearXNG error: {response.status} - {error_text}")
-                    return "Ошибка при поиске. Попробуйте позже."
-
+                    return None  # вернём None, чтобы потом использовать Groq
                 data = await response.json()
                 if "results" not in data or not data["results"]:
-                    return "По вашему запросу ничего не найдено."
-
+                    return None
                 snippets = []
                 for item in data["results"][:3]:
                     title = item.get("title", "")
                     snippet = item.get("content", item.get("snippet", ""))
                     url = item.get("url", "")
                     snippets.append(f"{title}. {snippet[:200]}... Источник: {url}")
-
                 combined = "\n\n".join(snippets)
                 ru_result = await translate_to_ru(combined)
                 return ru_result
-
-    except aiohttp.ClientError as e:
-        print(f"SearXNG connection error: {e}")
-        return "Не удалось подключиться к поисковому сервису."
     except Exception as e:
         print(f"SearXNG error: {e}")
-        return f"Ошибка поиска: {e}"
+        return None
 
-# ---------- Погода ----------
+# ---------- Погода (с переводом города) ----------
 async def get_weather(city):
     try:
-        geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1"
+        city_en = await translate_to_en(city)
+        if not city_en:
+            city_en = city
+        geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_en}&count=1"
         async with aiohttp.ClientSession() as session:
             async with session.get(geocode_url) as resp:
                 data = await resp.json()
@@ -123,7 +119,7 @@ async def get_time(timezone_str="UTC"):
     except:
         return "Неверный часовой пояс."
 
-# ---------- Обычный ответ через Groq ----------
+# ---------- Обычный ответ через Groq (запасной вариант) ----------
 async def ask_groq(user_id, prompt):
     history = user_histories.get(user_id, [])
     history.append({"role": "user", "content": prompt})
@@ -131,7 +127,7 @@ async def ask_groq(user_id, prompt):
         history = history[-MAX_HISTORY:]
 
     messages = [
-        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по существу."}
+        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по существу. Если не знаешь — скажи, что не знаешь."}
     ] + history
 
     try:
@@ -155,6 +151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
+    # Проверка упоминания
     mentioned = False
     if update.message.entities:
         for entity in update.message.entities:
@@ -182,7 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     lower = clean_text.lower()
 
-    # Погода
+    # ---- Погода (приоритет) ----
     if "погод" in lower:
         if "в " in lower:
             city = clean_text.split("в ", 1)[1].strip()
@@ -192,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Время
+    # ---- Время ----
     if "врем" in lower or "сколько времени" in lower:
         if "в " in lower:
             tz_part = clean_text.split("в ", 1)[1].strip()
@@ -209,16 +206,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Поиск в интернете
-    search_keywords = ["найди", "поищи", "узнай", "что такое", "кто такой", "какой", "где", "когда", "сколько"]
-    if any(kw in lower for kw in search_keywords):
-        reply = await web_search(clean_text)
+    # ---- Любой другой вопрос → СНАЧАЛА ПОИСК В ИНТЕРНЕТЕ ----
+    search_result = await web_search(clean_text)
+    if search_result:
+        await update.message.reply_text(search_result)
+    else:
+        # Если поиск не дал результатов — используем Groq (с памятью)
+        reply = await ask_groq(user_id, clean_text)
         await update.message.reply_text(reply)
-        return
-
-    # Обычный вопрос
-    reply = await ask_groq(user_id, clean_text)
-    await update.message.reply_text(reply)
 
 # ---------- Запуск ----------
 def main():
