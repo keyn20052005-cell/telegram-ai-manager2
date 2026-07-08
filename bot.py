@@ -20,11 +20,34 @@ async def ask_groq(prompt):
         return f"Ошибка: {e}"
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.mention or (
-        update.message.reply_to_message and
-        update.message.reply_to_message.from_user.username == context.bot.username
-    ):
+    # Игнорируем сообщения без текста
+    if not update.message or not update.message.text:
+        return
+
+    # Проверяем, упомянут ли бот
+    mentioned = False
+
+    # 1) Проверка через entities (упоминания через @)
+    if update.message.entities:
+        for entity in update.message.entities:
+            if entity.type == "mention":
+                username = update.message.text[entity.offset:entity.offset+entity.length]
+                if username == f"@{context.bot.username}":
+                    mentioned = True
+                    break
+            elif entity.type == "text_mention":
+                if entity.user.username == context.bot.username:
+                    mentioned = True
+                    break
+
+    # 2) Проверка, если это ответ на сообщение бота
+    if (update.message.reply_to_message and 
+        update.message.reply_to_message.from_user.username == context.bot.username):
+        mentioned = True
+
+    if mentioned:
         user_text = update.message.text
+        # Убираем упоминание бота из текста
         clean_text = user_text.replace(f"@{context.bot.username}", "").strip()
         if clean_text:
             reply = await ask_groq(clean_text)
@@ -33,6 +56,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Принудительно удаляем старый вебхук (на всякий случай)
+    app.bot.delete_webhook()
     app.run_polling()
 
 if __name__ == "__main__":
