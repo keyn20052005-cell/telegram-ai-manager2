@@ -1,7 +1,12 @@
 import os
+import asyncio
+import aiohttp
+from datetime import datetime
+import pytz
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from groq import Groq
+from duckduckgo_search import DDGS
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -9,52 +14,89 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
 user_histories = {}
+MAX_HISTORY = 5  # последние 5 сообщений
 
-MAX_HISTORY = 10          # всего 10 сообщений на пользователя
-MAX_MSG_LEN = 500         # каждое сообщение не длиннее 500 символов
+# ---------- Поиск в интернете через DuckDuckGo ----------
+async def web_search(query):
+    """Ищет в интернете через DuckDuckGo и возвращает краткий ответ"""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+            if not results:
+                return "Ничего не найдено."
+            # Формируем краткий ответ из первых 3 результатов
+            snippets = []
+            for r in results:
+                snippets.append(f"• {r['title']}: {r['body'][:200]}...")
+            return "\n".join(snippets)
+    except Exception as e:
+        return f"Ошибка поиска: {e}"
 
-async def ask_groq_with_history(user_id, new_message):
+# ---------- Погода и время (как раньше) ----------
+async def get_weather(city):
+    try:
+        geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(geocode_url) as resp:
+                data = await resp.json()
+                if not data.get("results"):
+                    return f"Город '{city}' не найден."
+                lat = data["results"][0]["latitude"]
+                lon = data["results"][0]["longitude"]
+                city_name = data["results"][0]["name"]
+                country = data["results"][0]["country"]
+        weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(weather_url) as resp:
+                weather_data = await resp.json()
+                current = weather_data["current_weather"]
+                temp = current["temperature"]
+                wind = current["windspeed"]
+                return f"Погода в {city_name}, {country}: {temp}°C, ветер {wind} км/ч."
+    except Exception as e:
+        return f"Не удалось получить погоду: {e}"
+
+async def get_time(timezone_str="UTC"):
+    try:
+        tz = pytz.timezone(timezone_str)
+        now = datetime.now(tz)
+        return now.strftime("%d.%m.%Y %H:%M:%S")
+    except:
+        return "Неверный часовой пояс."
+
+# ---------- Основная функция с ИИ (без поиска) ----------
+async def ask_groq(user_id, prompt):
     history = user_histories.get(user_id, [])
-    
-    # Обрезаем новое сообщение
-    if len(new_message) > MAX_MSG_LEN:
-        new_message = new_message[:MAX_MSG_LEN]
-    
-    history.append({"role": "user", "content": new_message})
-    
-    # Оставляем только последние MAX_HISTORY
+    history.append({"role": "user", "content": prompt})
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
-    
+
     messages = [
-        {"role": "system", "content": "Ты полезный ассистент с доступом в интернет. Отвечай кратко, но информативно."}
+        {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко и по существу."}
     ] + history
-    
+
     try:
         chat_completion = client.chat.completions.create(
             messages=messages,
-            model="groq/compound",
-            max_tokens=1024,        # уменьшили до 1024
+            model="llama-3.1-8b-instant",
+            max_tokens=1024,
             temperature=0.7
         )
         reply = chat_completion.choices[0].message.content
-        
-        # Обрезаем ответ, если он слишком длинный, перед сохранением
-        if len(reply) > MAX_MSG_LEN:
-            reply = reply[:MAX_MSG_LEN]
         history.append({"role": "assistant", "content": reply})
         if len(history) > MAX_HISTORY:
             history = history[-MAX_HISTORY:]
         user_histories[user_id] = history
-        
         return reply
     except Exception as e:
-        return f"Ошибка при запросе к ИИ: {e}"
+        return f"Ошибка ИИ: {e}"
 
+# ---------- Обработчик сообщений ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-    
+
+    # Проверка упоминания
     mentioned = False
     if update.message.entities:
         for entity in update.message.entities:
@@ -70,14 +112,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (update.message.reply_to_message and 
         update.message.reply_to_message.from_user.username == context.bot.username):
         mentioned = True
-    
-    if mentioned:
-        user_text = update.message.text
-        clean_text = user_text.replace(f"@{context.bot.username}", "").strip()
-        if clean_text:
-            user_id = update.message.from_user.id
-            reply = await ask_groq_with_history(user_id, clean_text)
-            await update.message.reply_text(reply)
+
+    if not mentioned:
+        return
+
+    user_text = update.message.text
+    clean_text = user_text.replace(f"@{context.bot.username}", "").strip()
+    if not clean_text:
+        return
+
+    user_id = update.message.from_user.id
+    lower = clean_text.lower()
+
+    # ---- Погода ----
+    if "погод" in lower:
+        if "в " in lower:
+            city = clean_text.split("в ", 1)[1].strip()
+        else:
+            city = "Москва"
+        reply = await get_weather(city)
+        await update.message.reply_text(reply)
+        return
+
+    # ---- Время ----
+    if "врем" in lower or "сколько времени" in lower:
+        if "в " in lower:
+            tz_part = clean_text.split("в ", 1)[1].strip()
+            tz_map = {
+                "москва": "Europe/Moscow",
+                "нью-йорк": "America/New_York",
+                "лондон": "Europe/London",
+                "токио": "Asia/Tokyo",
+            }
+            tz = tz_map.get(tz_part.lower(), "UTC")
+        else:
+            tz = "UTC"
+        reply = f"Текущее время: {await get_time(tz)} (пояс {tz})"
+        await update.message.reply_text(reply)
+        return
+
+    # ---- Поиск в интернете (если вопрос содержит ключевые слова) ----
+    search_keywords = ["найди", "поищи", "узнай", "что такое", "кто такой", "какой", "где", "когда", "сколько"]
+    if any(kw in lower for kw in search_keywords):
+        reply = await web_search(clean_text)
+        await update.message.reply_text(reply)
+        return
+
+    # ---- Обычный вопрос через ИИ ----
+    reply = await ask_groq(user_id, clean_text)
+    await update.message.reply_text(reply)
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
