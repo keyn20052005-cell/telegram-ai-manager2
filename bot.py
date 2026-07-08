@@ -8,42 +8,40 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# Словарь для хранения истории по каждому пользователю
 user_histories = {}
 
-# Максимальное количество сообщений в истории на пользователя
-MAX_HISTORY = 20
-
-# Максимальная длина одного сообщения (чтобы не перегружать запрос)
-MAX_MSG_LEN = 1000
+MAX_HISTORY = 10          # всего 10 сообщений на пользователя
+MAX_MSG_LEN = 500         # каждое сообщение не длиннее 500 символов
 
 async def ask_groq_with_history(user_id, new_message):
     history = user_histories.get(user_id, [])
     
-    # Ограничиваем длину нового сообщения
+    # Обрезаем новое сообщение
     if len(new_message) > MAX_MSG_LEN:
         new_message = new_message[:MAX_MSG_LEN]
     
     history.append({"role": "user", "content": new_message})
     
-    # Оставляем только последние MAX_HISTORY сообщений
+    # Оставляем только последние MAX_HISTORY
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
     
     messages = [
-        {"role": "system", "content": "Ты полезный ассистент. У тебя есть доступ к интернету для поиска актуальной информации, погоды, времени и новостей. Отвечай подробно, но по делу."}
+        {"role": "system", "content": "Ты полезный ассистент с доступом в интернет. Отвечай кратко, но информативно."}
     ] + history
     
     try:
         chat_completion = client.chat.completions.create(
             messages=messages,
             model="groq/compound",
-            max_tokens=2048,
+            max_tokens=1024,        # уменьшили до 1024
             temperature=0.7
         )
         reply = chat_completion.choices[0].message.content
         
-        # Сохраняем ответ в историю
+        # Обрезаем ответ, если он слишком длинный, перед сохранением
+        if len(reply) > MAX_MSG_LEN:
+            reply = reply[:MAX_MSG_LEN]
         history.append({"role": "assistant", "content": reply})
         if len(history) > MAX_HISTORY:
             history = history[-MAX_HISTORY:]
@@ -57,7 +55,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     
-    # Проверка упоминания
     mentioned = False
     if update.message.entities:
         for entity in update.message.entities:
