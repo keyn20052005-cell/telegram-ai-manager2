@@ -2,4 +2,4 @@ python-telegram-bot==20.8
 groq==0.4.0
 aiohttp
 pytz
-duckduckgo-search
+googletrans==4.0.0-rc1
