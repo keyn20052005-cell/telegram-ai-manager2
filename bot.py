@@ -16,23 +16,64 @@ client = Groq(api_key=GROQ_API_KEY)
 user_histories = {}
 MAX_HISTORY = 5  # последние 5 сообщений
 
+# ---------- Вспомогательные функции для перевода ----------
+async def translate_text(text, target_lang="ru"):
+    """Переводит текст на целевой язык (ru/en) через Groq"""
+    if not text:
+        return text
+    lang_name = "русский" if target_lang == "ru" else "английский"
+    prompt = f"Переведи на {lang_name} (только перевод, без пояснений):\n{text}"
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=300,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return text  # при ошибке возвращаем оригинал
+
+async def translate_to_en(text):
+    """Перевод на английский (короткий, для поиска)"""
+    if not text:
+        return text
+    prompt = f"Translate to English for internet search (only translation, no extra text):\n{text}"
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=60,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return text
+
 # ---------- Поиск в интернете через DuckDuckGo ----------
 async def web_search(query):
-    """Ищет в интернете через DuckDuckGo и возвращает краткий ответ"""
+    """Ищет в интернете через DuckDuckGo, переводит запрос на английский, результат переводит на русский"""
+    # Переводим запрос на английский
+    en_query = await translate_to_en(query)
+    if not en_query:
+        en_query = query
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
+            results = list(ddgs.text(en_query, max_results=3))
             if not results:
                 return "Ничего не найдено."
-            # Формируем краткий ответ из первых 3 результатов
+            # Формируем краткую выжимку на английском
             snippets = []
             for r in results:
-                snippets.append(f"• {r['title']}: {r['body'][:200]}...")
-            return "\n".join(snippets)
+                snippets.append(f"{r['title']}. {r['body'][:200]}")
+            combined = "\n".join(snippets)
+            # Переводим результат на русский
+            ru_result = await translate_text(combined, "ru")
+            return ru_result
     except Exception as e:
         return f"Ошибка поиска: {e}"
 
-# ---------- Погода и время (как раньше) ----------
+# ---------- Погода и время (без изменений) ----------
 async def get_weather(city):
     try:
         geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1"
@@ -64,7 +105,7 @@ async def get_time(timezone_str="UTC"):
     except:
         return "Неверный часовой пояс."
 
-# ---------- Основная функция с ИИ (без поиска) ----------
+# ---------- Обычный ответ через Groq (с памятью) ----------
 async def ask_groq(user_id, prompt):
     history = user_histories.get(user_id, [])
     history.append({"role": "user", "content": prompt})
@@ -151,7 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---- Поиск в интернете (если вопрос содержит ключевые слова) ----
+    # ---- Интернет-поиск (автоматически, если есть ключевые слова) ----
     search_keywords = ["найди", "поищи", "узнай", "что такое", "кто такой", "какой", "где", "когда", "сколько"]
     if any(kw in lower for kw in search_keywords):
         reply = await web_search(clean_text)
